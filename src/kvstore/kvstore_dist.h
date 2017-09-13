@@ -147,8 +147,10 @@ class KVStoreDist : public KVStoreLocal {
       for (const auto& v : values) {
         v.WaitToWrite();
       }
+      Barrier();
     } else {
       // do nothing
+      Barrier();
     }
     if (!ps::Postoffice::Get()->is_recovery()) {
       Barrier();
