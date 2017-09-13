@@ -149,7 +149,7 @@ class KVStoreDist : public KVStoreLocal {
       }
       Barrier();
     } else {
-      // do nothing kkkkkkk
+      // do nothing kkk
       Barrier();
     }
     if (!ps::Postoffice::Get()->is_recovery()) {
