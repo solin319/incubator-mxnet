@@ -195,7 +195,8 @@ nnvm::Graph Imperative::CachedOp::GetForwardGraph(
   bool match = true;
   match &= CheckAndInferShape(&g, std::move(shape_inputs), true);
   match &= CheckAndInferType(&g, std::move(dtype_inputs), true);
-  match &= CheckAndInferStorageType(&g, inputs[0]->ctx(),
+  exec::DevMaskVector dev_mask(g.indexed_graph().num_nodes(), inputs[0]->ctx().dev_mask());
+  match &= CheckAndInferStorageType(&g, std::move(dev_mask),
                                     std::move(storage_type_inputs), true);
 
   if (!match) {
@@ -282,7 +283,8 @@ nnvm::Graph Imperative::CachedOp::GetBackwardGraph(
                               node_range, entry_range);
   match &= CheckAndInferType(&g, std::move(dtypes), false,
                              node_range, entry_range);
-  match &= CheckAndInferStorageType(&g, inputs[0]->ctx(), std::move(stypes),
+  exec::DevMaskVector dev_mask(idx.num_nodes(), inputs[0]->ctx().dev_mask());
+  match &= CheckAndInferStorageType(&g, std::move(dev_mask), std::move(stypes),
                                     false, node_range, entry_range);
 
   if (!match) {
@@ -305,14 +307,27 @@ nnvm::Graph Imperative::CachedOp::GetBackwardGraph(
 }
 
 OpStatePtr Imperative::CachedOp::Forward(const std::vector<NDArray*>& inputs,
-                                                const std::vector<NDArray*>& outputs) {
+                                         const std::vector<NDArray*>& outputs) {
   using namespace nnvm;
   using namespace imperative;
+
   bool recording = Imperative::Get()->set_is_recording(false);
   // Initialize
   nnvm::Graph g = GetForwardGraph(recording, inputs);
   const auto& idx = g.indexed_graph();
   size_t num_inputs = idx.input_nodes().size();
+
+  CHECK_EQ(num_inputs, inputs.size())
+      << "CachedOp requires " << num_inputs << " but got " << inputs.size();
+
+  Context default_ctx = inputs[0]->ctx();
+  for (size_t i = 0; i < inputs.size(); ++i) {
+    CHECK_EQ(inputs[i]->ctx(), default_ctx)
+        << "CachedOp requires all inputs to live on the same context. But "
+        << idx[idx.input_nodes()[0]].source->attrs.name << " is on " << default_ctx
+        << " while " << idx[idx.input_nodes()[i]].source->attrs.name << " is on "
+        << inputs[i]->ctx();
+  }
 
   auto op_state_ptr = OpStatePtr::Create<CachedOpState>();
   auto& cached_op_state = op_state_ptr.get_state<CachedOpState>();
@@ -344,15 +359,15 @@ OpStatePtr Imperative::CachedOp::Forward(const std::vector<NDArray*>& inputs,
     if (ref_count[i] == 0) array_reqs[i] = kNullOp;
   }
 
-  Context default_ctx = inputs[0]->ctx();
   const auto& mem_plan = g.GetAttr<MemoryPlanVector >(
       recording ? "full_mem_plan" : "forward_mem_plan");
   AllocateMemory(g, idx, default_ctx, 0, idx.num_node_entries(),
                  mem_plan, arrays, &array_reqs);
 
+  const auto& dispatch_modes = g.GetAttr<DispatchModeVector>("dispatch_mode");
   Imperative::Get()->RunGraph(
-      false, default_ctx, idx, arrays, 0, idx.num_nodes(), std::move(array_reqs),
-      std::move(ref_count), &states);
+      false, idx, arrays, 0, idx.num_nodes(), std::move(array_reqs),
+      std::move(ref_count), &states, dispatch_modes);
 
   for (size_t i = 0; i < idx.num_node_entries(); ++i) {
     if (arrays[i] == &buff[i]) continue;
@@ -419,9 +434,10 @@ void Imperative::CachedOp::Backward(
   AllocateMemory(g, idx, default_ctx, num_forward_entries, idx.num_node_entries(),
                  mem_plan, arrays, &array_reqs);
 
+  const auto& dispatch_modes = g.GetAttr<DispatchModeVector>("dispatch_mode");
   Imperative::Get()->RunGraph(
-      retain_graph, default_ctx, idx, arrays, num_forward_nodes, idx.num_nodes(),
-      std::move(array_reqs), std::move(ref_count), &states);
+      retain_graph, idx, arrays, num_forward_nodes, idx.num_nodes(),
+      std::move(array_reqs), std::move(ref_count), &states, dispatch_modes);
 
   if (retain_graph) {
     buff.resize(num_forward_entries);
